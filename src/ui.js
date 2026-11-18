@@ -19,7 +19,7 @@ export function createUI({ getStandings, getName, onName, onVote }) {
   const $el = {
     hud: $('hud'), timeLeft: $('timeLeft'), progress: $('progress'), leaderName: $('leaderName'), leaderDist: $('leaderDist'), power: $('power'),
     countdown: $('countdown'), banner: $('banner'), tap: $('tap'),
-    lobby: $('lobby'), lobbyMsg: $('lobbyMsg'), lobbyNum: $('lobbyNum'), lobbyUnit: $('lobbyUnit'), lobbyBig: $('lobbyBig'), lobbyList: $('lobbyList'), voteBtn: $('voteBtn'), steps: $('lobbySteps'),
+    lobby: $('lobby'), lobbyMsg: $('lobbyMsg'), lobbyNum: $('lobbyNum'), lobbyUnit: $('lobbyUnit'), lobbyBig: $('lobbyBig'), lobbyList: $('lobbyList'), voteBtn: $('voteBtn'), renameBtn: $('renameBtn'), nameCancel: $('nameCancel'), steps: $('lobbySteps'),
     nameForm: $('nameForm'), nameInput: $('nameInput'),
     results: $('results'), resTitle: $('resTitle'), rankList: $('rankList'), totalList: $('totalList'), resTabs: $('resTabs'), resBar: $('resBar'),
     tkTrack: $('tkTrack'), nextIn: $('nextIn'), conn: $('conn'),
@@ -37,12 +37,18 @@ export function createUI({ getStandings, getName, onName, onVote }) {
     $el.nameForm.hidden = true;
     onName(n);
   });
-  // Oyun tuşları (boşluk) yazı alanındayken vuruş sayılmasın
+  const closeName = () => { $el.nameForm.hidden = true; $el.nameInput.blur(); };
+  $el.nameCancel.addEventListener('click', closeName);
+  $el.nameInput.addEventListener('keydown', (e) => { if (e.key === 'Escape' && getName()) closeName(); });
+  // Ad girişi / değiştirme. Zaten adı olan oyuncu vazgeçebilir; ilk girişte ad zorunludur.
   function askName() {
     $el.nameInput.value = getName() || '';
+    $el.nameCancel.hidden = !getName();
     $el.nameForm.hidden = false;
     $el.nameInput.focus();
+    $el.nameInput.select();
   }
+  $el.renameBtn.addEventListener('click', askName);
 
   function setCountdown(text) {
     if (text === last.count) return;
@@ -101,6 +107,8 @@ export function createUI({ getStandings, getName, onName, onVote }) {
         return li;
       }));
 
+      // Ad, liste kilitlenmeden (bekleme/oylama; antrenmanda geri sayım bitmeden) değiştirilebilir
+      $el.renameBtn.hidden = !(L.stage === 'waiting' || L.stage === 'voting' || L.stage === 'queued' || (L.practice && L.stage === 'starting'));
       const b = $el.voteBtn;
       b.hidden = !(L.joined && !L.practice && (L.stage === 'waiting' || L.stage === 'voting'));
       b.disabled = L.stage === 'waiting';

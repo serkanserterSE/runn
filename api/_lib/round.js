@@ -19,12 +19,12 @@ export function verify(id, slot, at, key) {
 /** Ham lobi verisi → lobide bulunan (son PRESENCE_MS içinde görülen) oyuncular, katılım sırasıyla. İlk RUNNERS kişi oynar, fazlası sırada bekler. */
 export function presentPlayers(raw, now) {
   const seen = new Map(raw.s);
+  const names = new Map(raw.n);
   const ready = new Set(raw.v.map(([pid]) => pid));
   const list = [];
-  for (const [pid, val] of raw.p) {
+  for (const [pid, join] of raw.p) {
     if (now - Number(seen.get(pid) ?? 0) > PRESENCE_MS) continue;
-    const i = val.indexOf('|');
-    list.push({ pid, join: Number(val.slice(0, i)), name: val.slice(i + 1), ready: ready.has(pid) });
+    list.push({ pid, join: Number(join), name: names.get(pid) ?? 'Player', ready: ready.has(pid) });
   }
   list.sort((a, b) => a.join - b.join || (a.pid < b.pid ? -1 : 1));
   return { players: list.slice(0, RUNNERS), queued: Math.max(0, list.length - RUNNERS), all: list };

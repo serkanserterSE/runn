@@ -3,7 +3,7 @@ import { send, readJson } from './_lib/http.js';
 import { currentRound, publicView, pubId, sign } from './_lib/round.js';
 import { cleanName, PID_RE } from '../src/roster.js';
 
-// POST /api/join { pid, name } — lobiye katıl ve "buradayım" de (istemci lobideyken HEARTBEAT_MS'de bir tekrarlar).
+// POST /api/join { pid, name } — lobiye katıl ve "buradayım" de (istemci lobideyken HEARTBEAT_MS'de bir tekrarlar; ad değişince de çağrılır).
 // Liste kilitlendiyse: oyuncu listedeyse { slot, key } (vuruş belirteci) döner, değilse 409 (sonraki turu bekler).
 // Yanıt her zaman güncel görünümdür (önbelleksiz) + me: oyuncunun herkese açık kimliği.
 export default async function handler(req, res) {
@@ -15,7 +15,7 @@ export default async function handler(req, res) {
   const now = Date.now();
   let r = await currentRound(now);
   if (!r.lock) {
-    await store.touch(r.id, pid, `${now}|${cleanName(b.name)}`, now);
+    await store.touch(r.id, pid, cleanName(b.name), now); // kilitten önce ad da güncellenir (ad değiştirme)
     r = await currentRound(now); // bu katılım kilidi atmış olabilir (8. oyuncu)
   }
   const out = { ...publicView(r), me: pubId(pid) };

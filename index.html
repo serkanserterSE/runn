@@ -36,6 +36,7 @@
       <p class="sub" id="lobbyMsg"></p>
       <ul id="lobbyList"></ul>
       <button type="button" id="voteBtn" class="go" hidden></button>
+      <button type="button" id="renameBtn" class="link" hidden>✎ Change my name</button>
       <p class="hint">The race starts 15 s after <b>all</b> players (min. 3) press ready — or automatically when 8 players have joined. Empty lanes are filled with bots.<br>Mash <kbd>SPACE</kbd> (or the RUN! button) to speed up — the boost fades fast, so keep tapping!</p>
     </section>
 
@@ -44,6 +45,7 @@
       <p class="sub">What's your name?</p>
       <input id="nameInput" type="text" maxlength="14" placeholder="Your name" aria-label="Your name" autocapitalize="words" spellcheck="false" required>
       <button type="submit" class="go">Join the race</button>
+      <button type="button" id="nameCancel" class="link" hidden>Cancel</button>
     </form>
 
     <section id="results" class="panel brick" hidden>

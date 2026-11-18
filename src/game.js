@@ -98,14 +98,16 @@ export function createGame() {
     const locked = !!rd.lock;
     if (locked && (!me.joined || me.key || me.closed)) return;
     const round = rd.id;
+    const sending = name;
     joining = true;
     try {
-      const { res, j } = await post('/api/join', { pid, name });
+      const { res, j } = await post('/api/join', { pid, name: sending });
       if (rd?.id !== round) return;
       if (res.ok) me.joined = true;
       else if (j.reason === 'closed') me.closed = true; // kilit atıldı, listede değiliz: sonraki turu bekle
     } catch { /* bir sonraki turda yeniden denenir */ }
     finally { joining = false; }
+    if (sending !== name) join(); // gönderilirken ad değişti: yenisini hemen ilet
   }
   setInterval(join, HEARTBEAT_MS);
 
@@ -198,6 +200,8 @@ export function createGame() {
     if (pending) { sim.setPresses(...pending); pending = null; }
     started = rd.id;
     resCache = null;
+    lastPress = -1; // tur başına sıfırla: önceki turun yarış saniyesi yeni turda vuruşları engellemesin
+    dirty.clear();
     laneOrder(rd.id, RUNNERS, snap.lanes);
   }
 
@@ -206,9 +210,13 @@ export function createGame() {
   return {
     get name() { return name; },
     get pid() { return pid; },
+    /** Ad ilk kez girilirken ya da lobide değiştirilirken; kilitten önce sunucudaki ad da güncellenir. */
     setName(n) {
-      name = cleanName(n); store.set('bm.name', name);
-      if (apiOff) { rd = null; started = -1; } else { schedule(0); join(); }
+      const next = cleanName(n);
+      if (next === name) return;
+      name = next; store.set('bm.name', name);
+      if (apiOff) { rd = null; started = -1; } // antrenman modu: tur yeni adla yeniden kurulur
+      else { schedule(0); join(); }
     },
     vote,
 

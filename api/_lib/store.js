@@ -3,7 +3,8 @@
 // Anahtarlar (hepsi küçük; tur verileri TTL ile kendiliğinden silinir):
 //   cur            → şu anki tur numarası
 //   round:<id>     → turun açılış zamanı (ms)
-//   p:<id>         → hash: pid → "katılımMs|ad" (değişmez)      s:<id> → hash: pid → son görülme (ms)      v:<id> → hash: pid → 1 (hazır)
+//   p:<id>         → hash: pid → katılım zamanı (ms, değişmez)   n:<id> → hash: pid → ad (kilitten önce değiştirilebilir)
+//   s:<id>         → hash: pid → son görülme (ms)                v:<id> → hash: pid → 1 (hazır)
 //   lock:<id>      → kilit kaydı (JSON): { at, names, pids, why } — yarışın oyuncu listesi ve zaman çapası
 //   presses:<id>   → hash: "slot:kova" → vuruş sayısı
 //   res:<id>       → kaydedilmiş yarış sonucu (JSON)
@@ -52,18 +53,19 @@ const redisStore = {
     await redis([['SET', `round:${id}`, now, 'NX', 'EX', TTL], ['SET', 'cur', id]]);
     return id;
   },
-  /** Lobi ham verisi: { lock | null, p: [[pid, değer]], s: [[pid, ms]], v: [[pid, 1]] } (tek çağrı, 4 komut) */
+  /** Lobi ham verisi: { lock | null, p: [[pid, katılımMs]], n: [[pid, ad]], s: [[pid, ms]], v: [[pid, 1]] } (tek çağrı, 5 komut) */
   async lobby(id) {
-    const [lock, p, s, v] = await redis([['GET', `lock:${id}`], ['HGETALL', `p:${id}`], ['HGETALL', `s:${id}`], ['HGETALL', `v:${id}`]]);
-    return { lock: lock ? JSON.parse(lock) : null, p: pairs(p), s: pairs(s), v: pairs(v) };
+    const [lock, p, n, s, v] = await redis([['GET', `lock:${id}`], ['HGETALL', `p:${id}`], ['HGETALL', `n:${id}`], ['HGETALL', `s:${id}`], ['HGETALL', `v:${id}`]]);
+    return { lock: lock ? JSON.parse(lock) : null, p: pairs(p), n: pairs(n), s: pairs(s), v: pairs(v) };
   },
   async getLock(id) {
     const [lock] = await redis([['GET', `lock:${id}`]]);
     return lock ? JSON.parse(lock) : null;
   },
-  /** Katıl / "buradayım": katılım kaydı değişmez (HSETNX), son görülme güncellenir. */
-  async touch(id, pid, value, now) {
-    await redis([['HSETNX', `p:${id}`, pid, value], ['HSET', `s:${id}`, pid, now], ['EXPIRE', `p:${id}`, TTL], ['EXPIRE', `s:${id}`, TTL]]);
+  /** Katıl / "buradayım": katılım zamanı değişmez (HSETNX, sıra korunur); ad ve son görülme güncellenir (ad değişikliği buradan geçer). */
+  async touch(id, pid, name, now) {
+    await redis([['HSETNX', `p:${id}`, pid, now], ['HSET', `n:${id}`, pid, name], ['HSET', `s:${id}`, pid, now],
+      ['EXPIRE', `p:${id}`, TTL], ['EXPIRE', `n:${id}`, TTL], ['EXPIRE', `s:${id}`, TTL]]);
   },
   async vote(id, pid, ready, now) {
     await redis([['HSET', `s:${id}`, pid, now], ready ? ['HSET', `v:${id}`, pid, 1] : ['HDEL', `v:${id}`, pid], ['EXPIRE', `v:${id}`, TTL]]);
@@ -110,20 +112,21 @@ const memoryStore = {
   kind: 'memory',
   async current() { return mem.cur || null; },
   async open(id, now) {
-    if (!mem.rounds.has(id)) mem.rounds.set(id, { at: now, p: new Map(), s: new Map(), v: new Map(), lock: null });
+    if (!mem.rounds.has(id)) mem.rounds.set(id, { at: now, p: new Map(), n: new Map(), s: new Map(), v: new Map(), lock: null });
     mem.cur = id;
     for (const m of [mem.rounds, mem.presses, mem.results]) m.delete(id - 20); // eski turlar bellekte birikmesin
     return id;
   },
   async lobby(id) {
     const r = memRound(id);
-    return { lock: r?.lock ?? null, p: [...(r?.p ?? [])], s: [...(r?.s ?? [])], v: [...(r?.v ?? [])] };
+    return { lock: r?.lock ?? null, p: [...(r?.p ?? [])], n: [...(r?.n ?? [])], s: [...(r?.s ?? [])], v: [...(r?.v ?? [])] };
   },
   async getLock(id) { return memRound(id)?.lock ?? null; },
-  async touch(id, pid, value, now) {
+  async touch(id, pid, name, now) {
     const r = memRound(id);
     if (!r) return;
-    if (!r.p.has(pid)) r.p.set(pid, value);
+    if (!r.p.has(pid)) r.p.set(pid, now);
+    r.n.set(pid, name);
     r.s.set(pid, now);
   },
   async vote(id, pid, ready, now) {
