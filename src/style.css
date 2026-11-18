@@ -41,7 +41,7 @@ h2 { font-size: 26px; margin-bottom: 12px; }
   font-size: min(32vw, 160px); font-weight: 900; color: #fff; pointer-events: none;
   text-shadow: 0 6px 0 var(--red), 0 10px 20px rgba(0,0,0,.35);
 }
-#banner { font-size: min(18vw, 100px); animation: bannerOut .6s ease 8s forwards; }
+#banner { top: 22%; font-size: min(14vw, 84px); animation: bannerOut .6s ease 8s forwards; }
 @keyframes bannerOut { to { opacity: 0; transform: translate(-50%, -50%) scale(.8); } }
 /* Sıralama paneli, kutlamayı kapatmasın diye gecikmeyle belirir */
 #results.late { animation: panelIn .6s ease 8s both; }

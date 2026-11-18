@@ -10,6 +10,6 @@ export default async function handler(req, res) {
   const now = Date.now();
   const r = await currentRound(now);
   const body = publicView(r);
-  if (r.lock && now >= r.lock.at + RACE_START * 1000) body.presses = await store.presses(r.id);
+  if (r.lock && now >= r.lock.at + RACE_START * 1000) { body.presses = await store.presses(r.id); body.t = now; } // t: verinin üretildiği an (istemci gecikmeyi buna göre telafi eder)
   send(res, 200, body, 'public, s-maxage=1');
 }

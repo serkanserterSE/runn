@@ -7,7 +7,9 @@ import {
 import { scoreDelta, toRows, emptyTotal, FIELDS } from './scoring.js';
 
 const TWO_PI = Math.PI * 2;
-const FLUSH_MS = 1000;
+const FLUSH_MS = 600; // vuruş gönderim aralığı: başkalarının gördüğü gecikmeyi belirleyen zincirin ilk halkası
+const RACE_POLL_MS = 800; // yarışta durum yoklama aralığı (sunucuda 1 sn CDN önbelleği var)
+const DATA_LAG = 1.0; // sn: bir vuruş, basıldıktan sonra bu sürede sunucu kaydına girmiş sayılır (gönderim + yazma)
 
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -69,7 +71,10 @@ export function createGame() {
     if (rd.lock && me.pub && me.slot < 0) me.slot = Math.max(-1, rd.lock.pubs.indexOf(me.pub));
     if (!rd.lock && me.pub) { const mine = rd.players.find((p) => p[2] === me.pub); if (mine && reqStart >= freshAt) me.ready = !!mine[1]; }
     if (j.slot != null) { me.slot = j.slot; me.key = j.key; if (started === rd.id) sim.setOwn(j.slot); }
-    if (j.presses) { if (started === rd.id) sim.setPresses(j.presses); else pending = j.presses; }
+    if (j.presses && rd.lock) {
+      const upTo = (j.t - rd.lock.at) / 1000 - RACE_START - DATA_LAG; // verinin tamamlandığı yarış sn'si (sunucu saatiyle)
+      if (started === rd.id) sim.setPresses(j.presses, upTo); else pending = [j.presses, upTo];
+    }
   }
 
   async function api(path, body) {
@@ -125,7 +130,7 @@ export function createGame() {
     if (!rd.lock) return 2000;
     const rt = (nowServer() - rd.lock.at) / 1000;
     if (rt >= ROUND_AFTER - 4) return 1000; // tur bitiyor: yenisini hızlı yakala
-    if (rt >= RACE_START - 1 && rt < RACE_START + RACE_SECONDS + 5) return 1500; // yarış: başkalarının tuşları
+    if (rt >= RACE_START - 1 && rt < RACE_START + RACE_SECONDS + 5) return RACE_POLL_MS; // yarış: başkalarının tuşları
     return 3000;
   }
   function schedule(ms = delay()) {
@@ -190,7 +195,7 @@ export function createGame() {
   function startSim() {
     sim.reset(rd.id, snap.runners.map((x) => x.bot));
     sim.setOwn(me.id === rd.id ? me.slot : -1);
-    if (pending) { sim.setPresses(pending); pending = null; }
+    if (pending) { sim.setPresses(...pending); pending = null; }
     started = rd.id;
     resCache = null;
     laneOrder(rd.id, RUNNERS, snap.lanes);

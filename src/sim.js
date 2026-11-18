@@ -2,12 +2,18 @@ import { Race, STEP } from './race.js';
 import { seedFor } from './rng.js';
 import { RACE_SECONDS, RUNNERS, BUCKET } from './schedule.js';
 
+const PRED_WINDOW = 3; // sn: tahmin için bakılan son vuruş penceresi
+
 /**
  * Bir turun yarışını sabit adımlarla ilerleten deterministik simülasyon.
  * Girdi: oyuncuların tuş vuruşları [slot, kova, adet] (kova = yarış saniyesi / BUCKET); botlar tohumdan kendi başına "basar".
  * Bir vuruş kovası, at = kova × BUCKET <= adım zamanı olan ilk adımda uygulanır.
  * Geç gelen veri (zamanı geçmiş bir kova) olursa simülasyon baştan, tam veriyle yeniden oynatılır: ucuz (≤ ~1000 adım) ve
  * böylece sunucunun sonradan hesapladığı sonuçla aynı yola yakınsar.
+ *
+ * Gecikme telafisi (yalnızca istemci görüntüsü): başkalarının vuruşları sunucudan ~1-2 sn gecikmeyle gelir. Verinin tamamlandığı an
+ * `upTo` (yarış sn) ise, ondan sonrası için diğer gerçek oyuncuların son ~3 sn'deki vuruş hızı sürdürülmüş varsayılır (tahmin).
+ * Gerçek veri gelince yeniden oynatma tahmini düzeltir. Sunucu hesabı `upTo` vermez: tahmin yok, sonuç kesin.
  */
 export class Sim {
   constructor(count = RUNNERS) {
@@ -22,6 +28,10 @@ export class Sim {
     this.dirty = false; // geçmişi etkileyen yeni veri: yeniden oynat
     this.unsorted = false;
     this.own = -1; // bu istemcinin slotu (-1: izleyici)
+    this.upTo = -1; // verinin tamamlandığı yarış saniyesi (-1: tahmin kapalı)
+    this.pred = []; // tahmin edilen [slot, kova başına vuruş]
+    this.predT = Infinity; // bir sonraki tahmin kovasının zamanı
+    this.predCarry = [];
   }
 
   reset(round, bots) {
@@ -30,6 +40,7 @@ export class Sim {
     this.entries.clear();
     this.list.length = 0;
     this.own = -1;
+    this.upTo = -1;
     this.dirty = false;
     this.unsorted = false;
     this._restart();
@@ -45,6 +56,23 @@ export class Sim {
     this.list.sort((a, b) => a.at - b.at || a.s - b.s);
     this.unsorted = false;
     this.dirty = false;
+    this._predict();
+  }
+
+  /** Diğer gerçek oyuncuların son PRED_WINDOW sn'deki ortalama vuruş hızından `upTo` sonrası için tahmin kur. */
+  _predict() {
+    this.pred.length = 0;
+    this.predCarry.length = 0;
+    this.predT = Infinity;
+    if (this.upTo < 0) return;
+    const lo = this.upTo - PRED_WINDOW;
+    const sum = new Map();
+    for (const e of this.entries.values()) {
+      if (e.s === this.own || this.bots[e.s] || e.at <= lo || e.at > this.upTo) continue;
+      sum.set(e.s, (sum.get(e.s) ?? 0) + e.c);
+    }
+    for (const [s, c] of sum) { this.pred.push([s, (c * BUCKET) / PRED_WINDOW]); this.predCarry.push(0); }
+    if (this.pred.length) this.predT = Math.ceil(this.upTo / BUCKET) * BUCKET;
   }
 
   /** Kaydı ekler/günceller (daha büyük değer kazanır); geçmişi değiştirdiyse true. */
@@ -63,10 +91,11 @@ export class Sim {
   }
 
   /** Sunucudaki vuruş listesinin tamamı (veya yeni kısmı): [[slot, kova, adet], ...] */
-  setPresses(list) {
+  setPresses(list, upTo) {
     for (const [s, b, c] of list) {
       if (this._put(s, b, c)) this.dirty = true;
     }
+    if (upTo != null && upTo > this.upTo) { this.upTo = upTo; this.dirty = true; } // tahmin penceresi ilerledi: baştan oynatılırken yeniden kurulur
     if (this.unsorted) { this.list.sort((a, b) => a.at - b.at || a.s - b.s); this.unsorted = false; }
   }
 
@@ -103,6 +132,14 @@ export class Sim {
     const t = this.steps * STEP + 1e-9;
     const l = this.list;
     while (this.cursor < l.length && l[this.cursor].at <= t) { const e = l[this.cursor++]; this.race.press(e.s, e.c); }
+    while (t >= this.predT) { // tahmin edilen vuruşlar (yalnızca istemci görüntüsü)
+      for (let i = 0; i < this.pred.length; i++) {
+        this.predCarry[i] += this.pred[i][1];
+        const n = Math.floor(this.predCarry[i]);
+        if (n > 0) { this.predCarry[i] -= n; this.race.press(this.pred[i][0], Math.min(n, 4)); }
+      }
+      this.predT += BUCKET;
+    }
     this.race.update(STEP);
     this.steps++;
   }

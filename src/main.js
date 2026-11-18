@@ -29,7 +29,7 @@ const views = RUNNER_DEFS.slice(0, MAX_RUNNERS).map((d, i) => {
 
 // Sunucudan gelen durumdan türetilen, her karede güncellenen koşucu durumu (GC'siz).
 const live = Array.from({ length: MAX_RUNNERS }, (_, id) => ({
-  id, dist: 0, v: 0, phase: 0, boostLevel: 0, taps: 0, rank: id + 1,
+  id, dist: 0, v: 0, phase: 0, boostLevel: 0, taps: 0, rank: id + 1, shown: 0,
 }));
 
 const cam = { dist: 0, back: 14, base: 14 };
@@ -79,7 +79,7 @@ let celebSeq = -1; // kutlaması başlamış yarışın seq'i
 let emoting = false;
 let excite = 0.2;
 let hype = 0;
-let swing = 0; // 0 = arkadan takip, 1 = koşucuların önünde
+let swing = 0; // 0 = oyuncuyu takip, 1 = bitiş kamerası (tabela ortada, hepsi kadrajda)
 const smooth = (x) => { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); };
 
 function updateCelebration(dt, time) {
@@ -91,7 +91,7 @@ function updateCelebration(dt, time) {
 
   const el = celebration.elapsed(time);
   const k = el < 0 ? 0 : smooth((el - CELEB_DELAY) / CELEB_BLEND);
-  const swingTarget = el < 0 ? 0 : smooth((el - 0.8) / 3);
+  const swingTarget = el < 0 ? 0 : smooth((el - 0.6) / 2.4);
   swing = swingTarget; // zaman tabanlı olduğundan ek yumuşatma gerekmez
   const winners = Math.min(3, count - 1); // en az bir üzgün kalsın
 
@@ -131,29 +131,43 @@ const camPt = { x: 0, z: 0, psi: 0 };
 const lookPt = { x: 0, z: 0, psi: 0 };
 const lanePt = { x: 0, z: 0, psi: 0 };
 
-/** Kamera pist eğrisini izler: grubun `back` metre gerisinde, `LOOK_AHEAD` metre ilerisine bakar. */
-function placeCamera(sc, back, swing = 0) {
+const camV = new THREE.Vector3();
+const tgtV = new THREE.Vector3();
+const finV = new THREE.Vector3();
+const finT = new THREE.Vector3();
+
+/** Takip kamerası: pist eğrisini izler; `sc` konumundaki koşucunun `back` metre gerisinde, `LOOK_AHEAD` metre ilerisine bakar. */
+function followPose(sc, back) {
   path(sc - back, 0, camPt);
   path(sc, 0, lookPt);
-  // Bakış, kameradan grubun ortasına doğru; viraj olsa da grup yatayda ortada kalır
+  // Bakış, kameradan koşucuya doğru; viraj olsa da koşucu yatayda ortada kalır
   const dx = lookPt.x - camPt.x, dz = lookPt.z - camPt.z;
   const k = (back + LOOK_AHEAD) / (Math.hypot(dx, dz) || 1);
-  let px = camPt.x, pz = camPt.z, py = Math.min(8, 2.2 + back * 0.22);
-  let tx = camPt.x + dx * k, ty = 0.8, tz = camPt.z + dz * k;
+  camV.set(camPt.x, Math.min(8, 2.2 + back * 0.22), camPt.z);
+  tgtV.set(camPt.x + dx * k, 0.8, camPt.z + dz * k);
+}
 
+/**
+ * Bitiş kamerası: bitiş tabelası (kapı) tam ortada; kamera koşucuların arkasında ve yukarıda, hepsi kadrajda.
+ * fs: kapının konumu, back: kamera ile kapı arası mesafe (en geride kalan koşucuyu da içine alır).
+ */
+function finishPose(fs, back) {
+  path(fs - back, 0, camPt);
+  path(fs, 0, lookPt);
+  finV.set(camPt.x, clamp(back * 0.3, 9, 22), camPt.z);
+  finT.set(lookPt.x, GANTRY_H * 0.45, lookPt.z);
+}
+
+/** swing 0 = koşucuyu takip, 1 = bitiş kamerası; aradaki geçiş yumuşak. */
+function placeCamera(sc, back, swing = 0, fs = 0, fBack = 30) {
+  followPose(sc, back);
   if (swing > 0) {
-    // Kutlama: kamera grubun etrafında iç sahadan dönerek koşucuların önüne geçer, geriye bakar
-    const th = swing * Math.PI;
-    const fx = -Math.sin(lookPt.psi), fz = -Math.cos(lookPt.psi); // yürüyüş yönü
-    const rx = Math.cos(lookPt.psi), rz = -Math.sin(lookPt.psi); // sağ (dış)
-    const along = -Math.cos(th) * back, side = -Math.sin(th) * 4.5;
-    px = lookPt.x + fx * along + rx * side;
-    pz = lookPt.z + fz * along + rz * side;
-    py = py + (3.2 - py) * swing;
-    tx += (lookPt.x - tx) * swing; tz += (lookPt.z - tz) * swing; ty = 0.9;
+    finishPose(fs, fBack);
+    camV.lerp(finV, swing);
+    tgtV.lerp(finT, swing);
   }
-  camera.position.set(px, py, pz);
-  camera.lookAt(tx, ty, tz);
+  camera.position.copy(camV);
+  camera.lookAt(tgtV);
 }
 
 // Uyarlanabilir çözünürlük: zayıf cihazda kare süresi uzarsa piksel oranı kademeli düşer, rahatlayınca geri çıkar
@@ -193,33 +207,41 @@ function step(dt, now) {
   if (snap) { onSnapshot(snap); syncNames(snap); }
   if (!snap) { placeCamera(0, cam.back); world.update(now / 1000); return; }
 
-  // Simülasyon 20 Hz adımlarla ilerler; aradaki kesri hızla ileri sararak 60 fps akıcılık
+  // Simülasyon 20 Hz adımlarla ilerler; aradaki kesri hızla ileri sararak 60 fps akıcılık.
+  // Yeniden oynatma (geç gelen vuruşlar) konumu sıçratabilir: gösterilen konum hızla ilerler, hedefe yumuşakça yaklaşır.
   const age = snap.age;
-  let mean = 0, min = Infinity, max = -Infinity;
+  const ease = 1 - Math.exp(-7 * dt);
+  let min = Infinity, leadI = 0;
   for (let i = 0; i < count; i++) {
     const d = snap.r[i], o = live[i];
     o.v = d[1];
-    o.dist = d[0] + d[1] * age;
+    const target = d[0] + d[1] * age;
+    if (snapCamera || Math.abs(target - o.shown) > 25) o.shown = target;
+    else { const p = o.shown + o.v * dt; o.shown = p + (target - p) * ease; }
+    o.dist = o.shown;
     o.phase = d[2] + d[1] * STRIDE * age;
     o.boostLevel = d[3];
     o.taps = d[4];
     o.rank = d[5];
-    mean += o.dist;
     if (o.dist < min) min = o.dist;
-    if (o.dist > max) max = o.dist;
+    if (o.rank === 1) leadI = i;
   }
-  mean /= count;
 
-  // Kamera grubu takip eder: odak ortalama ile uçların ortası arasında, grup açıldıkça geri çekilir
-  const focus = mean * 0.5 + ((max + min) / 2) * 0.5;
-  const targetBack = cam.base + clamp((max - min - 8) * 0.5, 0, 30);
+  // Kamera oyuncuyu takip eder (izleyici: lideri); arkaya çekilme hıza göre hafifçe artar
+  const fi = snap.slot >= 0 ? snap.slot : leadI;
+  const focus = live[fi].dist;
+  const targetBack = cam.base + 1 + clamp((live[fi].v - 5) * 0.6, 0, 3);
   if (snapCamera) {
     cam.dist = focus; cam.back = targetBack; snapCamera = false;
   } else {
-    const k = 1 - Math.exp(-5 * dt);
+    const k = 1 - Math.exp(-8 * dt);
     cam.dist += (focus - cam.dist) * k;
-    cam.back += (targetBack - cam.back) * k;
+    cam.back += (targetBack - cam.back) * (1 - Math.exp(-3 * dt));
   }
+  // Bitiş: kapı (yoksa lider) merkezde; en geride kalan koşucu da görünsün
+  let fs = snap.f;
+  if (fs == null) { fs = 0; for (let i = 0; i < count; i++) if (live[i].dist > fs) fs = live[i].dist; }
+  const fBack = clamp(fs - min + 12, 26, 80);
 
   for (let i = 0; i < count; i++) {
     const o = live[i];
@@ -232,7 +254,7 @@ function step(dt, now) {
 
   updateCelebration(dt, now / 1000);
   ui.sync(snap, live, 0);
-  placeCamera(cam.dist, cam.back, swing);
+  placeCamera(cam.dist, cam.back, swing, fs, fBack);
   world.setFinish(snap.f);
   world.update(now / 1000);
   celebration.update(now / 1000, camera);
