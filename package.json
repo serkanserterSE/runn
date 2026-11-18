@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host",
-    "dev:server": "node --watch server/dev.js",
+    "dev:server": "node --watch --env-file-if-exists=.env server/dev.js",
     "build": "vite build",
     "start": "node server/dev.js",
     "serve": "vite build && node server/dev.js"
