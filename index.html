@@ -18,11 +18,33 @@
       <div class="hud-time" id="timeLeft">00:00</div>
       <div class="hud-progress"><i id="progress"></i></div>
       <div class="hud-leader">Leader: <b id="leaderName">-</b> · <span id="leaderDist">0 m</span></div>
+      <div class="hud-power" id="powerWrap"><span>POWER</span><div class="pw"><i id="power"></i></div></div>
     </header>
 
     <div id="countdown" hidden></div>
     <div id="banner" hidden>FINISH!</div>
-    <nav id="boosts" hidden></nav>
+    <button type="button" id="tap" hidden>RUN!<small>tap here or press <kbd>SPACE</kbd></small></button>
+
+    <section id="lobby" class="panel brick" hidden>
+      <h2>Lobby</h2>
+      <ol class="steps" id="lobbySteps" aria-label="Game start steps">
+        <li data-step="players"><b>1</b><span>Players</span><em></em></li>
+        <li data-step="vote"><b>2</b><span>Vote</span><em></em></li>
+        <li data-step="start"><b>3</b><span>Start</span><em></em></li>
+      </ol>
+      <div class="lobby-timer" id="lobbyBig"><b id="lobbyNum">0</b><span id="lobbyUnit"></span></div>
+      <p class="sub" id="lobbyMsg"></p>
+      <ul id="lobbyList"></ul>
+      <button type="button" id="voteBtn" class="go" hidden></button>
+      <p class="hint">The race starts 15 s after <b>all</b> players (min. 3) press ready — or automatically when 8 players have joined. Empty lanes are filled with bots.<br>Mash <kbd>SPACE</kbd> (or the RUN! button) to speed up — the boost fades fast, so keep tapping!</p>
+    </section>
+
+    <form id="nameForm" class="panel brick" hidden autocomplete="off">
+      <h1>Brick Marathon</h1>
+      <p class="sub">What's your name?</p>
+      <input id="nameInput" type="text" maxlength="14" placeholder="Your name" aria-label="Your name" autocapitalize="words" spellcheck="false" required>
+      <button type="submit" class="go">Join the race</button>
+    </form>
 
     <section id="results" class="panel brick" hidden>
       <h2 id="resTitle">🏆 Standings</h2>

@@ -1,11 +1,18 @@
 // Kalıcı veri: Upstash/Vercel KV (Redis REST). Yerelde, Redis yoksa bellek içi yedek (yalnızca geliştirme için).
-// Yazma hacmi düşük: hediyeler (saniye, koşucu) kovalarında toplanır, bir webhook isteği tek Redis çağrısıdır.
-import { scoreDelta, toRows } from '../../src/scoring.js';
-import { CONFIG_KEY, GIFT_ALIASES_KEY, parsePer, fallbackPer } from './config.js';
+//
+// Anahtarlar (hepsi küçük; tur verileri TTL ile kendiliğinden silinir):
+//   cur            → şu anki tur numarası
+//   round:<id>     → turun açılış zamanı (ms)
+//   p:<id>         → hash: pid → "katılımMs|ad" (değişmez)      s:<id> → hash: pid → son görülme (ms)      v:<id> → hash: pid → 1 (hazır)
+//   lock:<id>      → kilit kaydı (JSON): { at, names, pids, why } — yarışın oyuncu listesi ve zaman çapası
+//   presses:<id>   → hash: "slot:kova" → vuruş sayısı
+//   res:<id>       → kaydedilmiş yarış sonucu (JSON)
+//   totals/names/races → genel sıralama
+import { scoreDelta, toRows, emptyTotal, FIELDS } from '../../src/scoring.js';
 
 const URL_ = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
 const TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
-const TTL = 60 * 60 * 24 * 7; // boost kayıtları 7 gün sonra silinir
+const TTL = 60 * 60 * 24; // tur verileri 1 gün sonra silinir
 
 async function redis(commands) {
   const res = await fetch(`${URL_}/pipeline`, {
@@ -17,95 +24,140 @@ async function redis(commands) {
   return (await res.json()).map((x) => x.result);
 }
 
+const pairs = (flat) => {
+  const out = [];
+  for (let i = 0; i < (flat?.length ?? 0); i += 2) out.push([flat[i], flat[i + 1]]);
+  return out;
+};
+const parsePresses = (flat) => pairs(flat).map(([k, c]) => { const [s, b] = k.split(':'); return [Number(s), Number(b), Number(c)]; });
+const buildTotals = (totalsFlat, namesFlat) => {
+  const names = Object.fromEntries(pairs(namesFlat));
+  const totals = {};
+  for (const [k, v] of pairs(totalsFlat)) {
+    const [pid, f] = k.split(':');
+    (totals[pid] ??= emptyTotal(names[pid] ?? 'Player'))[f] = Number(v);
+  }
+  return totals;
+};
+
 const redisStore = {
   kind: 'redis',
-  /** gifts: [[bucket, runner, coins], ...] — (saniye, koşucu) başına jeton toplanır; tek istekte tüm yazmalar. */
-  async addGifts(cycle, gifts) {
-    const key = `gifts:${cycle}`;
-    await redis([...gifts.map(([b, id, c]) => ['HINCRBY', key, `${b}:${id}`, c]), ['EXPIRE', key, TTL]]);
+  /** Şu anki tur numarası | null */
+  async current() {
+    const [id] = await redis([['GET', 'cur']]);
+    return id ? Number(id) : null;
   },
-  /** { per, list: [[id, at, jeton], ...] } — per: o yarışa sabitlenmiş "boost başına jeton". */
-  async getBoosts(cycle) {
-    const [flat, pinned] = await redis([['HGETALL', `gifts:${cycle}`], ['GET', `cfg:${cycle}`]]);
-    const list = [];
-    for (let i = 0; i < (flat?.length ?? 0); i += 2) {
-      const [at, id] = flat[i].split(':');
-      list.push([Number(id), Number(at), Number(flat[i + 1])]);
-    }
-    return { per: parsePer(pinned) ?? fallbackPer(), list };
+  /** Yeni tur aç (aynı anda birden çok istek gelirse ilki kazanır; sonuç aynı numaradır). */
+  async open(id, now) {
+    await redis([['SET', `round:${id}`, now, 'NX', 'EX', TTL], ['SET', 'cur', id]]);
+    return id;
   },
-  /**
-   * Webhook başlangıcı, TEK Redis çağrısı: olay kimliklerinden yenileri işaretle (tekrar eden webhook'lara karşı) ve
-   * bu yarışın "boost başına jeton" değerini Redis yapılandırmasından (yoksa varsayılandan) sabitle.
-   * Aynı çağrıda hediye adı eşleşme yapılandırmasını (Redis config:giftAliases) da okur.
-   * Dönüş: { fresh: boolean[], per, aliases: ham JSON | null }
-   */
-  async begin(cycle, ids) {
-    const pin = `local v = tonumber(redis.call('GET', KEYS[2])); if not v or v < 1 or v > 100000 or v ~= math.floor(v) then v = tonumber(ARGV[1]) end
-redis.call('SET', KEYS[1], v, 'NX', 'EX', ARGV[2]); return redis.call('GET', KEYS[1])`;
-    const res = await redis([
-      ...ids.map((id) => ['SET', `ev:${id}`, 1, 'NX', 'EX', 3600]),
-      ['EVAL', pin, 2, `cfg:${cycle}`, CONFIG_KEY, fallbackPer(), TTL],
-      ['GET', GIFT_ALIASES_KEY],
-    ]);
-    return {
-      fresh: res.slice(0, ids.length).map((r) => r === 'OK'),
-      per: parsePer(res[ids.length]) ?? fallbackPer(),
-      aliases: res[ids.length + 1] ?? null,
-    };
+  /** Lobi ham verisi: { lock | null, p: [[pid, değer]], s: [[pid, ms]], v: [[pid, 1]] } (tek çağrı, 4 komut) */
+  async lobby(id) {
+    const [lock, p, s, v] = await redis([['GET', `lock:${id}`], ['HGETALL', `p:${id}`], ['HGETALL', `s:${id}`], ['HGETALL', `v:${id}`]]);
+    return { lock: lock ? JSON.parse(lock) : null, p: pairs(p), s: pairs(s), v: pairs(v) };
   },
-  /** Başarısız yazmada olay kimliklerini geri al (yeniden denenince yinelenen sayılmasın). */
-  async forget(ids) { if (ids.length) await redis([['DEL', ...ids.map((id) => `ev:${id}`)]]); },
-  /** true: yeni kaydedildi (toplamlar güncellendi), false: zaten kayıtlıydı. */
-  async recordResult(cycle, results) {
-    const [added] = await redis([['HSETNX', 'results', String(cycle), JSON.stringify(results)]]);
-    if (!added) return false;
+  async getLock(id) {
+    const [lock] = await redis([['GET', `lock:${id}`]]);
+    return lock ? JSON.parse(lock) : null;
+  },
+  /** Katıl / "buradayım": katılım kaydı değişmez (HSETNX), son görülme güncellenir. */
+  async touch(id, pid, value, now) {
+    await redis([['HSETNX', `p:${id}`, pid, value], ['HSET', `s:${id}`, pid, now], ['EXPIRE', `p:${id}`, TTL], ['EXPIRE', `s:${id}`, TTL]]);
+  },
+  async vote(id, pid, ready, now) {
+    await redis([['HSET', `s:${id}`, pid, now], ready ? ['HSET', `v:${id}`, pid, 1] : ['HDEL', `v:${id}`, pid], ['EXPIRE', `v:${id}`, TTL]]);
+  },
+  /** Listeyi kilitle (ilk yazan kazanır); geçerli kilit kaydını döndürür. */
+  async lock(id, rec) {
+    const res = await redis([['SET', `lock:${id}`, JSON.stringify(rec), 'NX', 'EX', TTL], ['GET', `lock:${id}`]]);
+    return JSON.parse(res[1]);
+  },
+  async presses(id) {
+    const [flat] = await redis([['HGETALL', `presses:${id}`]]);
+    return parsePresses(flat);
+  },
+  /** entries: [[slot, kova, adet]] — HSET (üzerine yazar): tekrar gönderim güvenlidir. */
+  async addPresses(id, entries) {
+    const key = `presses:${id}`;
+    await redis([['HSET', key, ...entries.flatMap(([s, b, c]) => [`${s}:${b}`, c])], ['EXPIRE', key, TTL]]);
+  },
+  async result(id) {
+    const [raw] = await redis([['GET', `res:${id}`]]);
+    return raw ? JSON.parse(raw) : null;
+  },
+  /** rows: [{pid, name, dist, bot}] birinciden sonuncuya. İlk kayıtta true (toplamlar güncellenir), tekrarında false. */
+  async recordResult(id, rows) {
+    const [added] = await redis([['SET', `res:${id}`, JSON.stringify(rows), 'NX', 'EX', TTL]]);
+    if (added !== 'OK') return false;
     const cmds = [['INCR', 'races']];
-    for (const d of scoreDelta(results)) {
-      for (const f of ['points', 'wins', 'podiums', 'dist', 'races']) cmds.push(['HINCRBY', 'totals', `${d.id}:${f}`, d[f]]);
+    for (const d of scoreDelta(rows)) {
+      cmds.push(['HSET', 'names', d.pid, d.name]);
+      for (const f of FIELDS) cmds.push(['HINCRBY', 'totals', `${d.pid}:${f}`, d[f]]);
     }
     await redis(cmds);
     return true;
   },
   async standings() {
-    const [flat, races] = await redis([['HGETALL', 'totals'], ['GET', 'races']]);
-    const totals = {};
-    for (let i = 0; i < (flat?.length ?? 0); i += 2) {
-      const [id, f] = flat[i].split(':');
-      (totals[id] ??= { points: 0, wins: 0, podiums: 0, dist: 0, races: 0 })[f] = Number(flat[i + 1]);
-    }
-    return { races: Number(races) || 0, rows: toRows(totals) };
+    const [totals, names, races] = await redis([['HGETALL', 'totals'], ['HGETALL', 'names'], ['GET', 'races']]);
+    return { races: Number(races) || 0, rows: toRows(buildTotals(totals, names)) };
   },
 };
 
-const mem = { config: process.env.COINS_PER_BOOST, giftAliases: null, pin: new Map(), gifts: new Map(), seen: new Set(), results: new Map(), totals: {}, races: 0 };
+const mem = { cur: 0, rounds: new Map(), presses: new Map(), results: new Map(), totals: {}, races: 0 };
+const memRound = (id) => mem.rounds.get(id);
 const memoryStore = {
   kind: 'memory',
-  async addGifts(cycle, gifts) {
-    const m = mem.gifts.get(cycle) ?? mem.gifts.set(cycle, new Map()).get(cycle);
-    for (const [b, id, c] of gifts) m.set(`${b}:${id}`, (m.get(`${b}:${id}`) ?? 0) + c);
+  async current() { return mem.cur || null; },
+  async open(id, now) {
+    if (!mem.rounds.has(id)) mem.rounds.set(id, { at: now, p: new Map(), s: new Map(), v: new Map(), lock: null });
+    mem.cur = id;
+    for (const m of [mem.rounds, mem.presses, mem.results]) m.delete(id - 20); // eski turlar bellekte birikmesin
+    return id;
   },
-  async getBoosts(cycle) {
-    const list = [...(mem.gifts.get(cycle) ?? [])].map(([k, c]) => { const [at, id] = k.split(':'); return [Number(id), Number(at), c]; });
-    return { per: mem.pin.get(cycle) ?? fallbackPer(), list };
+  async lobby(id) {
+    const r = memRound(id);
+    return { lock: r?.lock ?? null, p: [...(r?.p ?? [])], s: [...(r?.s ?? [])], v: [...(r?.v ?? [])] };
   },
-  async forget(ids) { for (const id of ids) mem.seen.delete(id); },
-  async begin(cycle, ids) {
-    if (!mem.pin.has(cycle)) mem.pin.set(cycle, parsePer(mem.config) ?? fallbackPer());
-    return { fresh: ids.map((id) => (mem.seen.has(id) ? false : (mem.seen.add(id), true))), per: mem.pin.get(cycle), aliases: mem.giftAliases ?? null };
+  async getLock(id) { return memRound(id)?.lock ?? null; },
+  async touch(id, pid, value, now) {
+    const r = memRound(id);
+    if (!r) return;
+    if (!r.p.has(pid)) r.p.set(pid, value);
+    r.s.set(pid, now);
   },
-  async recordResult(cycle, results) {
-    if (mem.results.has(cycle)) return false;
-    mem.results.set(cycle, results);
+  async vote(id, pid, ready, now) {
+    const r = memRound(id);
+    if (!r) return;
+    r.s.set(pid, now);
+    if (ready) r.v.set(pid, 1); else r.v.delete(pid);
+  },
+  async lock(id, rec) {
+    const r = memRound(id);
+    r.lock ??= rec;
+    return r.lock;
+  },
+  async presses(id) { return [...(mem.presses.get(id) ?? [])].map(([k, c]) => { const [s, b] = k.split(':'); return [Number(s), Number(b), c]; }); },
+  async addPresses(id, entries) {
+    const m = mem.presses.get(id) ?? mem.presses.set(id, new Map()).get(id);
+    for (const [s, b, c] of entries) m.set(`${s}:${b}`, c);
+  },
+  async result(id) { return mem.results.get(id) ?? null; },
+  async recordResult(id, rows) {
+    if (mem.results.has(id)) return false;
+    mem.results.set(id, rows);
     mem.races++;
-    for (const d of scoreDelta(results)) {
-      const t = (mem.totals[d.id] ??= { points: 0, wins: 0, podiums: 0, dist: 0, races: 0 });
-      for (const f of ['points', 'wins', 'podiums', 'dist', 'races']) t[f] += d[f];
+    for (const d of scoreDelta(rows)) {
+      const t = (mem.totals[d.pid] ??= emptyTotal(d.name));
+      t.name = d.name;
+      for (const f of FIELDS) t[f] += d[f];
     }
     return true;
   },
   async standings() { return { races: mem.races, rows: toRows(mem.totals) }; },
 };
 
-// Vercel'de bellek yedeği güvenilmezdir (her çağrı farklı örnekte çalışabilir): Redis yoksa depo yok sayılır.
+// Vercel'de bellek yedeği güvenilmezdir (her çağrı farklı örnekte çalışabilir): Redis yoksa depo yok sayılır
+// ve istemci tek kişilik antrenman moduna düşer.
 export const store = URL_ && TOKEN ? redisStore : process.env.VERCEL ? null : memoryStore;
+export const SIGN_KEY = process.env.SIGNING_SECRET || TOKEN || 'dev-only-signing-key';

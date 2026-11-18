@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { cssColor } from './config.js';
-import { flagCanvas } from './flags.js';
 
 // Paylaşılan geometri / materyaller (draw call ve bellek tasarrufu)
 const BOX = new THREE.BoxGeometry(1, 1, 1);
@@ -48,16 +47,40 @@ RAIN_MAT.onBeforeCompile = (shader) => {
 };
 const PODIUM_MATS = [0xffc933, 0xc9d1da, 0xcd7f32].map((c) => plastic(c)); // altın, gümüş, bronz
 
-const FLAG_MATS = new Map();
-function flagMaterial(code) {
-  let m = FLAG_MATS.get(code);
-  if (!m) {
-    const map = new THREE.CanvasTexture(flagCanvas(code));
-    map.colorSpace = THREE.SRGBColorSpace;
-    m = new THREE.SpriteMaterial({ map, depthWrite: false, fog: false });
-    FLAG_MATS.set(code, m);
-  }
-  return m;
+// Ad etiketi: koşucunun başında, her zaman kameraya dönük. Canvas yalnızca ad/vurgu değişince yeniden çizilir.
+const LABEL_W = 256, LABEL_H = 64;
+function createLabel(color) {
+  const c = document.createElement('canvas');
+  c.width = LABEL_W; c.height = LABEL_H;
+  const g = c.getContext('2d');
+  const map = new THREE.CanvasTexture(c);
+  map.colorSpace = THREE.SRGBColorSpace;
+  map.anisotropy = 2;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map, depthWrite: false, fog: false }));
+  sprite.scale.set(1.5, 0.375, 1);
+  let key = '';
+  return {
+    sprite,
+    set(name, mine) {
+      const k = `${mine ? 1 : 0}${name}`;
+      if (k === key) return;
+      key = k;
+      g.clearRect(0, 0, LABEL_W, LABEL_H);
+      g.font = '800 34px ui-rounded, "SF Pro Rounded", system-ui, sans-serif';
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      const w = Math.min(LABEL_W - 8, g.measureText(name).width + 34);
+      g.fillStyle = mine ? '#ffd400' : 'rgba(255,255,255,.92)';
+      g.strokeStyle = color;
+      g.lineWidth = 6;
+      g.beginPath();
+      g.roundRect((LABEL_W - w) / 2, 6, w, LABEL_H - 12, 20);
+      g.fill(); g.stroke();
+      g.fillStyle = '#1d2a44';
+      g.fillText(name, LABEL_W / 2, LABEL_H / 2 + 2, LABEL_W - 40);
+      map.needsUpdate = true;
+    },
+  };
 }
 
 function part(geo, mat, sx, sy, sz, x = 0, y = 0, z = 0) {
@@ -156,11 +179,9 @@ export function createRunner(def, number) {
   trail.visible = false;
   root.add(trail);
 
-  // Ülke bayrağı: başın üstünde, her zaman kameraya dönük küçük yuvarlak rozet
-  const flag = new THREE.Sprite(flagMaterial(def.code));
-  flag.scale.set(0.5, 0.5, 1);
-  flag.position.y = 1.82;
-  body.add(flag);
+  const label = createLabel(cssColor(def.color));
+  label.sprite.position.y = 1.85;
+  body.add(label.sprite);
 
   // Podyum (ilk üç): koşucunun altında yükselen madalya renkli blok
   const podium = new THREE.Mesh(BOX, PODIUM_MATS[0]);
@@ -189,6 +210,8 @@ export function createRunner(def, number) {
 
   return {
     root,
+    /** Başın üstündeki ad etiketi; mine: bu cihazdaki oyuncu (vurgulu). */
+    setName: label.set,
     /** phase: adım fazı, amp: hareket şiddeti (0 = dururken), boost: 0..1 */
     pose(phase, amp, boost) {
       const s = Math.sin(phase);

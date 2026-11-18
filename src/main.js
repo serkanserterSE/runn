@@ -29,7 +29,7 @@ const views = RUNNER_DEFS.slice(0, MAX_RUNNERS).map((d, i) => {
 
 // Sunucudan gelen durumdan türetilen, her karede güncellenen koşucu durumu (GC'siz).
 const live = Array.from({ length: MAX_RUNNERS }, (_, id) => ({
-  id, dist: 0, v: 0, phase: 0, boostLevel: 0, coins: 0, boosts: 0, rank: id + 1,
+  id, dist: 0, v: 0, phase: 0, boostLevel: 0, taps: 0, rank: id + 1,
 }));
 
 const cam = { dist: 0, back: 14, base: 14 };
@@ -46,12 +46,30 @@ function onSnapshot(s) {
   if (s.n !== count) {
     count = s.n;
     views.forEach((v, i) => { v.root.visible = i < count; });
-    ui.build(count);
-    alignBar();
   }
 }
 
-const ui = createUI({ getStandings: (cycle) => game.standings(cycle) });
+const ui = createUI({ getStandings: (round) => game.standings(round), getName: () => game.name, onName: (n) => game.setName(n), onVote: (on) => game.vote(on) });
+if (!game.name) ui.askName();
+
+// Ad etiketleri: adlar ya da "bu benim koşucum" değişince güncellenir
+let lastRunners = null;
+let lastSlot = -2;
+function syncNames(s) {
+  if (s.runners === lastRunners && s.slot === lastSlot) return;
+  lastRunners = s.runners; lastSlot = s.slot;
+  for (let i = 0; i < count; i++) views[i].setName(s.runners[i].name, i === s.slot);
+}
+
+// Giriş: boşluk tuşu (basılı tutma sayılmaz) ve ekrana dokunma
+const typing = () => /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName ?? '');
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'Space' || typing()) return;
+  e.preventDefault();
+  if (!e.repeat) game.press();
+});
+canvas.addEventListener('pointerdown', () => game.press());
+document.getElementById('tap').addEventListener('pointerdown', (e) => { e.preventDefault(); game.press(); });
 
 // Kutlama / seyirci coşkusu durumu
 const CELEB_DELAY = 0.5; // sn: koşucular yavaşlasın, sonra sevinç/üzüntü başlasın
@@ -164,25 +182,6 @@ function resize() {
   const halfW = (MAX_RUNNERS * LANE_W) / 2 * 1.08;
   const need = halfW / (Math.tan(THREE.MathUtils.degToRad(FOV / 2)) * camera.aspect);
   cam.base = Math.max(12, need);
-  alignBar();
-}
-
-/** Boost butonlarını koşucu şeritlerinin ekran konumunun altına hizala. */
-function alignBar() {
-  if (!count) return;
-  const w = window.innerWidth;
-  placeCamera(0, cam.base); // ana düzlükte, başlangıç dizilişi
-  camera.updateMatrixWorld();
-  const half = (count * LANE_W) / 2;
-  const a = new THREE.Vector3(Rc - half, 0, 0).project(camera);
-  const b = new THREE.Vector3(Rc + half, 0, 0).project(camera);
-  let left = (a.x * 0.5 + 0.5) * w;
-  const right = (b.x * 0.5 + 0.5) * w;
-  const margin = 8;
-  let width = Math.max(right - left, Math.min(count * 56, w - margin * 2));
-  left = clamp((left + right) / 2 - width / 2, margin, w - margin - width);
-  width = Math.min(width, w - margin * 2);
-  ui.setBar(left, width);
 }
 
 window.addEventListener('resize', resize);
@@ -191,33 +190,34 @@ window.addEventListener('orientationchange', resize);
 function step(dt, now) {
   setRunnerTime(now / 1000);
   snap = game.snapshot();
-  if (snap) onSnapshot(snap);
+  if (snap) { onSnapshot(snap); syncNames(snap); }
   if (!snap) { placeCamera(0, cam.back); world.update(now / 1000); return; }
 
   // Simülasyon 20 Hz adımlarla ilerler; aradaki kesri hızla ileri sararak 60 fps akıcılık
   const age = snap.age;
-  let mean = 0, min = Infinity;
+  let mean = 0, min = Infinity, max = -Infinity;
   for (let i = 0; i < count; i++) {
     const d = snap.r[i], o = live[i];
     o.v = d[1];
     o.dist = d[0] + d[1] * age;
     o.phase = d[2] + d[1] * STRIDE * age;
     o.boostLevel = d[3];
-    o.coins = d[4];
-    o.boosts = d[6];
+    o.taps = d[4];
     o.rank = d[5];
     mean += o.dist;
     if (o.dist < min) min = o.dist;
+    if (o.dist > max) max = o.dist;
   }
   mean /= count;
 
-  // Kamera grubu takip eder
-  const targetBack = cam.base + clamp((mean - min - 3) * 0.6, 0, 8);
+  // Kamera grubu takip eder: odak ortalama ile uçların ortası arasında, grup açıldıkça geri çekilir
+  const focus = mean * 0.5 + ((max + min) / 2) * 0.5;
+  const targetBack = cam.base + clamp((max - min - 8) * 0.5, 0, 30);
   if (snapCamera) {
-    cam.dist = mean; cam.back = targetBack; snapCamera = false;
+    cam.dist = focus; cam.back = targetBack; snapCamera = false;
   } else {
     const k = 1 - Math.exp(-5 * dt);
-    cam.dist += (mean - cam.dist) * k;
+    cam.dist += (focus - cam.dist) * k;
     cam.back += (targetBack - cam.back) * k;
   }
 
